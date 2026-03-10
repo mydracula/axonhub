@@ -1,0 +1,45 @@
+name: Build Frontend Dist
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-frontend-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - name: Build frontend and copy dist
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+          cd ..
+          rm -rf internal/server/static/dist
+          mkdir -p internal/server/static/dist
+          cp -r frontend/dist/* internal/server/static/dist/
+
+      - name: Commit dist if changed
+        run: |
+          if [ -n "$(git status --porcelain internal/server/static/dist)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f internal/server/static/dist
+            git commit -m "chore: update frontend dist"
+            git push
+          else
+            echo "No changes to commit"
+          fi
