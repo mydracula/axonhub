@@ -1,4 +1,4 @@
-FROM ghcr.io/mydracula/axonhub:latest-arm64
+FROM ghcr.io/mydracula/axonhub:latest-amd64
 
 USER root
 RUN apk upgrade --no-cache zlib
