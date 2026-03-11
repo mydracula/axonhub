@@ -1,2 +1,5 @@
 FROM ghcr.io/mydracula/axonhub:latest-arm64
+
+USER root
+RUN apk upgrade --no-cache zlib
 USER 10014
