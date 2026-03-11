@@ -8,7 +8,8 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 
 COPY ./frontend .
 ENV NODE_OPTIONS="--max-old-space-size=4096"
-RUN pnpm build
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm build
 
 # Copy dist to a stage with the target platform to avoid architecture mismatch
 FROM alpine AS frontend-dist
