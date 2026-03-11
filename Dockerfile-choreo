@@ -4,6 +4,7 @@ WORKDIR /build
 RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm config set only-built-dependencies "[@swc/core,@tailwindcss/oxide,esbuild]" && \
     pnpm install --frozen-lockfile --force --ignore-scripts=false
 
 COPY ./frontend .
