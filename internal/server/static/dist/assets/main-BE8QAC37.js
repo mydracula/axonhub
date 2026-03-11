@@ -1,0 +1,1 @@
+import{j as n,c as r}from"./index-P4nSg7m-.js";const m=({fixed:e,className:a,...i})=>n.jsx("main",{className:r("peer-[.header-fixed]/header:mt-16","px-4 py-6",e&&"fixed-main flex min-h-0 min-w-0 grow flex-col overflow-hidden",a),...i});m.displayName="Main";export{m as M};
