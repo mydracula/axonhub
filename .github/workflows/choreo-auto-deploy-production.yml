@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   deploy-production:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     env:
       CHOREO_PROJECT: ${{ vars.CHOREO_PROJECT }}
       CHOREO_COMPONENT: ${{ vars.CHOREO_COMPONENT }}
@@ -29,150 +29,116 @@ jobs:
       EXPECTED_IMAGE_TAG: ${{ github.event.client_payload.image_tag || inputs.expected_image_tag }}
     steps:
       - name: Validate required configuration
-        shell: bash
+        shell: pwsh
         env:
           CHOREO_TOKEN: ${{ secrets.CHOREO_TOKEN }}
         run: |
-          set -euo pipefail
-          if [[ -z "${CHOREO_TOKEN:-}" ]]; then
-            echo "Missing required secret: CHOREO_TOKEN"
-            exit 1
-          fi
-          if [[ -z "${CHOREO_PROJECT:-}" ]]; then
-            echo "Missing required repository variable: CHOREO_PROJECT"
-            exit 1
-          fi
-          if [[ -z "${CHOREO_COMPONENT:-}" ]]; then
-            echo "Missing required repository variable: CHOREO_COMPONENT"
-            exit 1
-          fi
-          if [[ -z "${EXPECTED_IMAGE_TAG:-}" ]]; then
-            echo "Missing expected image tag from dispatch payload or manual input."
-            exit 1
-          fi
+          if ([string]::IsNullOrWhiteSpace($env:CHOREO_TOKEN)) {
+            throw "Missing required secret: CHOREO_TOKEN"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CHOREO_PROJECT)) {
+            throw "Missing required repository variable: CHOREO_PROJECT"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CHOREO_COMPONENT)) {
+            throw "Missing required repository variable: CHOREO_COMPONENT"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:EXPECTED_IMAGE_TAG)) {
+            throw "Missing expected image tag from dispatch payload or manual input."
+          }
 
       - name: Install Choreo CLI
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          curl -fsSL https://cli.choreo.dev/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.choreo/bin" >> "$GITHUB_PATH"
+          $ErrorActionPreference = "Stop"
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/wso2/choreo-cli/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "windows-amd64" -and $_.name -like "*.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            throw "Failed to find Windows choreo CLI asset in latest release."
+          }
+
+          $installDir = Join-Path $env:USERPROFILE ".choreo\\bin"
+          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+
+          $zipPath = Join-Path $env:RUNNER_TEMP "choreo.zip"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+          $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Resolve CLI binary
         id: cli
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if command -v choreo >/dev/null 2>&1; then
-            echo "name=choreo" >> "$GITHUB_OUTPUT"
-            choreo --version
-            exit 0
-          fi
-          if command -v wdp >/dev/null 2>&1; then
-            echo "name=wdp" >> "$GITHUB_OUTPUT"
-            wdp --version
-            exit 0
-          fi
-          echo "Neither 'choreo' nor 'wdp' CLI is available after install."
-          exit 1
+          $ErrorActionPreference = "Stop"
+
+          $cli = Get-Command choreo -ErrorAction SilentlyContinue
+          if (-not $cli) {
+            $cli = Get-Command wdp -ErrorAction SilentlyContinue
+          }
+          if (-not $cli) {
+            throw "Neither 'choreo' nor 'wdp' CLI is available after install."
+          }
+
+          "path=$($cli.Source)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          & $cli.Source --version
 
       - name: Login, wait for Development, then deploy to Production
-        shell: bash
+        shell: pwsh
         env:
           CHOREO_TOKEN: ${{ secrets.CHOREO_TOKEN }}
-          CHOREO_CLI: ${{ steps.cli.outputs.name }}
+          CHOREO_CLI: ${{ steps.cli.outputs.path }}
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
 
-          # choreo login stores credentials in Linux keyring; CI runners need a secrets service.
-          if ! command -v dbus-launch >/dev/null 2>&1 || ! command -v gnome-keyring-daemon >/dev/null 2>&1 || ! command -v secret-tool >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring libsecret-tools
-          fi
+          $devEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_DEV_ENV)) { "Development" } else { $env:CHOREO_DEV_ENV }
+          $prodEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_PROD_ENV)) { "Production" } else { $env:CHOREO_PROD_ENV }
+          $expectedTag = "$($env:EXPECTED_IMAGE_TAG)-amd64"
 
-          uid="$(id -u)"
-          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
-          if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
-            sudo mkdir -p "$XDG_RUNTIME_DIR"
-            sudo chown "$uid:$uid" "$XDG_RUNTIME_DIR"
-          fi
-          chmod 700 "$XDG_RUNTIME_DIR"
+          $env:CHOREO_TOKEN | & $env:CHOREO_CLI login --with-token
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
-          if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-            eval "$(dbus-launch --sh-syntax)"
-          fi
+          $buildId = ""
+          $ready = $false
 
-          # Initialize and unlock the default collection in a headless session.
-          eval "$(echo -n '' | gnome-keyring-daemon --unlock --daemonize --components=secrets)"
+          for ($i = 1; $i -le 90; $i++) {
+            $out = (& $env:CHOREO_CLI describe component $env:CHOREO_COMPONENT "--project=$($env:CHOREO_PROJECT)" 2>&1 | Out-String)
+            Write-Output $out
 
-          # Seed the collection once so org.freedesktop.secrets has a usable default alias.
-          printf 'bootstrap' | secret-tool store --label='choreo-ci-bootstrap' service choreo-ci user bootstrap >/dev/null 2>&1 || true
+            $idMatches = [regex]::Matches($out, "build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($idMatches.Count -gt 0) {
+              $buildId = $idMatches[$idMatches.Count - 1].Groups[1].Value
+              Write-Output "Detected build id candidate: $buildId"
+            }
 
-          echo "$CHOREO_TOKEN" | "$CHOREO_CLI" login --with-token
+            $hasEnv = $out -match [regex]::Escape($devEnv)
+            $hasTag = $out.Contains($expectedTag)
+            $hasSuccess = $out -match "(?i)(successful|active|ready|deployed)"
+            $hasFailure = $out -match "(?i)(failed|error|canceled|cancelled)"
 
-          dev_env="${CHOREO_DEV_ENV:-Development}"
-          prod_env="${CHOREO_PROD_ENV:-Production}"
-          expected_tag="${EXPECTED_IMAGE_TAG}-amd64"
-          build_id=""
-          ready='false'
-
-          for i in {1..90}; do
-            out="$("$CHOREO_CLI" describe component "$CHOREO_COMPONENT" --project="$CHOREO_PROJECT" 2>&1 || true)"
-            echo "$out"
-
-            candidate_build_id="$(echo "$out" | grep -Eio 'build[[:space:]_-]*id[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._:-]+' \
-              | awk -F '[:=]' '{gsub(/[[:space:]]/, "", $2); print $2}' \
-              | tail -n1 || true)"
-            if [[ -n "$candidate_build_id" ]]; then
-              build_id="$candidate_build_id"
-              echo "Detected build id candidate: $build_id"
-            fi
-
-            has_env='false'
-            if echo "$out" | grep -Eiq "$dev_env"; then
-              has_env='true'
-            fi
-
-            has_tag='false'
-            if echo "$out" | grep -Fq "$expected_tag"; then
-              has_tag='true'
-            fi
-
-            has_success='false'
-            if echo "$out" | grep -Eiq 'successful|active|ready|deployed'; then
-              has_success='true'
-            fi
-
-            has_failure='false'
-            if echo "$out" | grep -Eiq 'failed|error|canceled|cancelled'; then
-              has_failure='true'
-            fi
-
-            if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_success" == 'true' ]]; then
-              echo "Development environment is ready on expected image tag: $expected_tag"
-              ready='true'
+            if ($hasEnv -and $hasTag -and $hasSuccess) {
+              Write-Output "Development environment is ready on expected image tag: $expectedTag"
+              $ready = $true
               break
-            fi
+            }
 
-            if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_failure" == 'true' ]]; then
-              echo "Development build/deploy failed for expected image tag: $expected_tag"
-              exit 1
-            fi
+            if ($hasEnv -and $hasTag -and $hasFailure) {
+              throw "Development build/deploy failed for expected image tag: $expectedTag"
+            }
 
-            echo "Development is not ready on $expected_tag yet (attempt $i/90), wait 20s..."
-            sleep 20
-          done
+            Write-Output "Development is not ready on $expectedTag yet (attempt $i/90), wait 20s..."
+            Start-Sleep -Seconds 20
+          }
 
-          if [[ "$ready" != 'true' ]]; then
-            echo "Timed out waiting for Development readiness on expected image tag."
-            exit 1
-          fi
+          if (-not $ready) {
+            throw "Timed out waiting for Development readiness on expected image tag."
+          }
 
-          if [[ -n "$build_id" ]]; then
-            "$CHOREO_CLI" create deployment "$CHOREO_COMPONENT" --env="$prod_env" --project="$CHOREO_PROJECT" --build-id="$build_id"
-            exit 0
-          fi
+          if (-not [string]::IsNullOrWhiteSpace($buildId)) {
+            & $env:CHOREO_CLI create deployment $env:CHOREO_COMPONENT "--env=$prodEnv" "--project=$($env:CHOREO_PROJECT)" "--build-id=$buildId"
+            exit $LASTEXITCODE
+          }
 
           # Fallback for CLI/format variants where build id is not exposed in component details.
-          "$CHOREO_CLI" create deployment "$CHOREO_COMPONENT" --env="$prod_env" --project="$CHOREO_PROJECT"
+          & $env:CHOREO_CLI create deployment $env:CHOREO_COMPONENT "--env=$prodEnv" "--project=$($env:CHOREO_PROJECT)"
+          exit $LASTEXITCODE
