@@ -93,6 +93,7 @@ jobs:
           $devEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_DEV_ENV)) { "Development" } else { $env:CHOREO_DEV_ENV }
           $prodEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_PROD_ENV)) { "Production" } else { $env:CHOREO_PROD_ENV }
           $expectedTag = "$($env:EXPECTED_IMAGE_TAG)-amd64"
+          $orgArg = if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) { "" } else { "--org=$($env:CHOREO_ORG)" }
 
           if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
             Write-Output "CHOREO_ORG is not set; using token default organization."
@@ -104,13 +105,15 @@ jobs:
             exit $LASTEXITCODE
           }
 
-          # PAT login mode does not support `change-org`; login --org is the supported way.
+          # PAT login mode does not support `change-org`; pass --org on each command instead.
 
           $buildId = ""
           $ready = $false
 
           for ($i = 1; $i -le 90; $i++) {
-            $out = (& $env:CHOREO_CLI describe component $env:CHOREO_COMPONENT "--project=$($env:CHOREO_PROJECT)" 2>&1 | Out-String)
+            $describeArgs = @("describe", "component", $env:CHOREO_COMPONENT, "--project=$($env:CHOREO_PROJECT)")
+            if ($orgArg -ne "") { $describeArgs += $orgArg }
+            $out = (& $env:CHOREO_CLI @describeArgs 2>&1 | Out-String)
             Write-Output $out
 
             $idMatches = [regex]::Matches($out, "build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -143,10 +146,14 @@ jobs:
           }
 
           if (-not [string]::IsNullOrWhiteSpace($buildId)) {
-            & $env:CHOREO_CLI create deployment $env:CHOREO_COMPONENT "--env=$prodEnv" "--project=$($env:CHOREO_PROJECT)" "--build-id=$buildId"
+            $deployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)", "--build-id=$buildId")
+            if ($orgArg -ne "") { $deployArgs += $orgArg }
+            & $env:CHOREO_CLI @deployArgs
             exit $LASTEXITCODE
           }
 
           # Fallback for CLI/format variants where build id is not exposed in component details.
-          & $env:CHOREO_CLI create deployment $env:CHOREO_COMPONENT "--env=$prodEnv" "--project=$($env:CHOREO_PROJECT)"
+          $fallbackDeployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)")
+          if ($orgArg -ne "") { $fallbackDeployArgs += $orgArg }
+          & $env:CHOREO_CLI @fallbackDeployArgs
           exit $LASTEXITCODE
