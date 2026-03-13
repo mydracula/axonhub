@@ -96,6 +96,10 @@ jobs:
           $expectedTag = "$($env:EXPECTED_IMAGE_TAG)-amd64"
           $orgArg = if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) { "" } else { "--org=$($env:CHOREO_ORG)" }
           $trackArg = if ([string]::IsNullOrWhiteSpace($env:CHOREO_DEPLOYMENT_TRACK)) { "" } else { "--deployment-track=$($env:CHOREO_DEPLOYMENT_TRACK)" }
+          $commitHint = ""
+          if ($env:EXPECTED_IMAGE_TAG -match "([0-9a-fA-F]{7,40})$") {
+            $commitHint = $Matches[1]
+          }
 
           if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
             Write-Output "CHOREO_ORG is not set; using token default organization."
@@ -119,7 +123,7 @@ jobs:
             $out = (& $env:CHOREO_CLI @describeArgs 2>&1 | Out-String)
             Write-Output $out
 
-            $idMatches = [regex]::Matches($out, "(?im)^\s*build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)\s*$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $idMatches = [regex]::Matches($out, "(?i)build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)")
             if ($idMatches.Count -gt 0) {
               $buildId = $idMatches[$idMatches.Count - 1].Groups[1].Value
               Write-Output "Detected build id candidate: $buildId"
@@ -149,7 +153,41 @@ jobs:
           }
 
           if ([string]::IsNullOrWhiteSpace($buildId)) {
-            throw "Development is ready but Build ID was not found from deployment details; cannot create Production deployment non-interactively. Set CHOREO_DEPLOYMENT_TRACK or check CLI output format."
+            Write-Output "Build ID not found in deployment details; fallback to list builds."
+            $listArgs = @("list", "builds", "--component=$($env:CHOREO_COMPONENT)", "--project=$($env:CHOREO_PROJECT)", "--non-interactive")
+            if ($orgArg -ne "") { $listArgs += $orgArg }
+            if ($trackArg -ne "") { $listArgs += $trackArg }
+            $buildsOut = (& $env:CHOREO_CLI @listArgs 2>&1 | Out-String)
+            Write-Output $buildsOut
+
+            $uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+            $lines = $buildsOut -split "`r?`n"
+
+            if (-not [string]::IsNullOrWhiteSpace($commitHint)) {
+              foreach ($line in $lines) {
+                $idMatch = [regex]::Match($line, $uuidPattern)
+                if ($idMatch.Success -and $line.ToLowerInvariant().Contains($commitHint.ToLowerInvariant())) {
+                  $buildId = $idMatch.Value
+                  Write-Output "Matched build ID by commit hint '$commitHint': $buildId"
+                  break
+                }
+              }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($buildId)) {
+              foreach ($line in $lines) {
+                $idMatch = [regex]::Match($line, $uuidPattern)
+                if ($idMatch.Success) {
+                  $buildId = $idMatch.Value
+                  Write-Output "Using latest visible build ID fallback: $buildId"
+                  break
+                }
+              }
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($buildId)) {
+            throw "Development is ready but Build ID is still unavailable after fallback; cannot create Production deployment non-interactively. Check list builds output format and CHOREO_DEPLOYMENT_TRACK."
           }
 
           $deployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)", "--build-id=$buildId")
