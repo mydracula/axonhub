@@ -77,33 +77,40 @@ jobs:
           echo "Neither 'choreo' nor 'wdp' CLI is available after install."
           exit 1
 
-      - name: Login with PAT
+      - name: Login, wait for Development, then deploy to Production
         shell: bash
         env:
           CHOREO_TOKEN: ${{ secrets.CHOREO_TOKEN }}
           CHOREO_CLI: ${{ steps.cli.outputs.name }}
         run: |
           set -euo pipefail
+
+          # choreo login stores credentials in Linux keyring; CI runners need a secrets service.
+          if ! command -v dbus-launch >/dev/null 2>&1 || ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+          fi
+
+          eval "$(dbus-launch --sh-syntax)"
+          eval "$(gnome-keyring-daemon --start --components=secrets)"
+
           echo "$CHOREO_TOKEN" | "$CHOREO_CLI" login --with-token
 
-      - name: Wait for Development to become ready on expected image
-        id: wait_dev
-        shell: bash
-        env:
-          CHOREO_CLI: ${{ steps.cli.outputs.name }}
-        run: |
-          set -euo pipefail
           dev_env="${CHOREO_DEV_ENV:-Development}"
+          prod_env="${CHOREO_PROD_ENV:-Production}"
           expected_tag="${EXPECTED_IMAGE_TAG}-amd64"
+          build_id=""
+          ready='false'
 
           for i in {1..90}; do
             out="$("$CHOREO_CLI" describe component "$CHOREO_COMPONENT" --project="$CHOREO_PROJECT" 2>&1 || true)"
             echo "$out"
 
-            build_id="$(echo "$out" | grep -Eio 'build[[:space:]_-]*id[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._:-]+' \
+            candidate_build_id="$(echo "$out" | grep -Eio 'build[[:space:]_-]*id[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._:-]+' \
               | awk -F '[:=]' '{gsub(/[[:space:]]/, "", $2); print $2}' \
               | tail -n1 || true)"
-            if [[ -n "$build_id" ]]; then
+            if [[ -n "$candidate_build_id" ]]; then
+              build_id="$candidate_build_id"
               echo "Detected build id candidate: $build_id"
             fi
 
@@ -129,8 +136,8 @@ jobs:
 
             if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_success" == 'true' ]]; then
               echo "Development environment is ready on expected image tag: $expected_tag"
-              echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
-              exit 0
+              ready='true'
+              break
             fi
 
             if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_failure" == 'true' ]]; then
@@ -142,17 +149,10 @@ jobs:
             sleep 20
           done
 
-          echo "Timed out waiting for Development readiness on expected image tag."
-          exit 1
-
-      - name: Deploy to Production
-        shell: bash
-        env:
-          CHOREO_CLI: ${{ steps.cli.outputs.name }}
-        run: |
-          set -euo pipefail
-          prod_env="${CHOREO_PROD_ENV:-Production}"
-          build_id="${{ steps.wait_dev.outputs.build_id }}"
+          if [[ "$ready" != 'true' ]]; then
+            echo "Timed out waiting for Development readiness on expected image tag."
+            exit 1
+          fi
 
           if [[ -n "$build_id" ]]; then
             "$CHOREO_CLI" create deployment "$CHOREO_COMPONENT" --env="$prod_env" --project="$CHOREO_PROJECT" --build-id="$build_id"
