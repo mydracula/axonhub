@@ -86,13 +86,28 @@ jobs:
           set -euo pipefail
 
           # choreo login stores credentials in Linux keyring; CI runners need a secrets service.
-          if ! command -v dbus-launch >/dev/null 2>&1 || ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+          if ! command -v dbus-launch >/dev/null 2>&1 || ! command -v gnome-keyring-daemon >/dev/null 2>&1 || ! command -v secret-tool >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+            sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring libsecret-tools
           fi
 
-          eval "$(dbus-launch --sh-syntax)"
-          eval "$(gnome-keyring-daemon --start --components=secrets)"
+          uid="$(id -u)"
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
+          if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+            sudo mkdir -p "$XDG_RUNTIME_DIR"
+            sudo chown "$uid:$uid" "$XDG_RUNTIME_DIR"
+          fi
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+            eval "$(dbus-launch --sh-syntax)"
+          fi
+
+          # Initialize and unlock the default collection in a headless session.
+          eval "$(echo -n '' | gnome-keyring-daemon --unlock --daemonize --components=secrets)"
+
+          # Seed the collection once so org.freedesktop.secrets has a usable default alias.
+          printf 'bootstrap' | secret-tool store --label='choreo-ci-bootstrap' service choreo-ci user bootstrap >/dev/null 2>&1 || true
 
           echo "$CHOREO_TOKEN" | "$CHOREO_CLI" login --with-token
 
