@@ -1,1 +1,0 @@
-import{r as e}from"./index-P4nSg7m-.js";const u=(n,r)=>{const t=e.useRef(()=>{});e.useEffect(()=>{t.current=n}),e.useEffect(()=>{if(r!==null){const s=setInterval(()=>t.current(),r||0);return()=>clearInterval(s)}},[r])};export{u};

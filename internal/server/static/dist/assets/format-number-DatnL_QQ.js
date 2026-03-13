@@ -1,1 +1,0 @@
-function u(t,n){if(t==null||Number.isNaN(t))return"0";const i=n?.digits??1,r=Math.abs(t),e=(o,m)=>`${(t/o).toFixed(i).replace(new RegExp("\\.0+$|(?<=\\.\\d*[1-9])0+$","g"),"").replace(/\.$/,"")}${m}`;return r>=1e9?e(1e9,"B"):r>=1e6?e(1e6,"M"):r>=1e3?e(1e3,"K"):parseFloat(t.toFixed(i)).toLocaleString(void 0,{maximumFractionDigits:i,minimumFractionDigits:0})}export{u as f};
