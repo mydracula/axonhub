@@ -25,6 +25,7 @@ jobs:
       CHOREO_PROJECT: ${{ vars.CHOREO_PROJECT }}
       CHOREO_COMPONENT: ${{ vars.CHOREO_COMPONENT }}
       CHOREO_ORG: ${{ vars.CHOREO_ORG }}
+      CHOREO_DEPLOYMENT_TRACK: ${{ vars.CHOREO_DEPLOYMENT_TRACK }}
       CHOREO_DEV_ENV: ${{ vars.CHOREO_DEV_ENV }}
       CHOREO_PROD_ENV: ${{ vars.CHOREO_PROD_ENV }}
       EXPECTED_IMAGE_TAG: ${{ github.event.client_payload.image_tag || inputs.expected_image_tag }}
@@ -94,6 +95,7 @@ jobs:
           $prodEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_PROD_ENV)) { "Production" } else { $env:CHOREO_PROD_ENV }
           $expectedTag = "$($env:EXPECTED_IMAGE_TAG)-amd64"
           $orgArg = if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) { "" } else { "--org=$($env:CHOREO_ORG)" }
+          $trackArg = if ([string]::IsNullOrWhiteSpace($env:CHOREO_DEPLOYMENT_TRACK)) { "" } else { "--deployment-track=$($env:CHOREO_DEPLOYMENT_TRACK)" }
 
           if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
             Write-Output "CHOREO_ORG is not set; using token default organization."
@@ -111,12 +113,13 @@ jobs:
           $ready = $false
 
           for ($i = 1; $i -le 90; $i++) {
-            $describeArgs = @("describe", "component", $env:CHOREO_COMPONENT, "--project=$($env:CHOREO_PROJECT)")
+            $describeArgs = @("describe", "deployment", "--component=$($env:CHOREO_COMPONENT)", "--project=$($env:CHOREO_PROJECT)", "--env=$devEnv")
             if ($orgArg -ne "") { $describeArgs += $orgArg }
+            if ($trackArg -ne "") { $describeArgs += $trackArg }
             $out = (& $env:CHOREO_CLI @describeArgs 2>&1 | Out-String)
             Write-Output $out
 
-            $idMatches = [regex]::Matches($out, "build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $idMatches = [regex]::Matches($out, "(?im)^\s*build[\s_-]*id\s*[:=]\s*([A-Za-z0-9._:-]+)\s*$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
             if ($idMatches.Count -gt 0) {
               $buildId = $idMatches[$idMatches.Count - 1].Groups[1].Value
               Write-Output "Detected build id candidate: $buildId"
@@ -145,15 +148,12 @@ jobs:
             throw "Timed out waiting for Development readiness on expected image tag."
           }
 
-          if (-not [string]::IsNullOrWhiteSpace($buildId)) {
-            $deployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)", "--build-id=$buildId")
-            if ($orgArg -ne "") { $deployArgs += $orgArg }
-            & $env:CHOREO_CLI @deployArgs
-            exit $LASTEXITCODE
+          if ([string]::IsNullOrWhiteSpace($buildId)) {
+            throw "Development is ready but Build ID was not found from deployment details; cannot create Production deployment non-interactively. Set CHOREO_DEPLOYMENT_TRACK or check CLI output format."
           }
 
-          # Fallback for CLI/format variants where build id is not exposed in component details.
-          $fallbackDeployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)")
-          if ($orgArg -ne "") { $fallbackDeployArgs += $orgArg }
-          & $env:CHOREO_CLI @fallbackDeployArgs
+          $deployArgs = @("create", "deployment", $env:CHOREO_COMPONENT, "--env=$prodEnv", "--project=$($env:CHOREO_PROJECT)", "--build-id=$buildId")
+          if ($orgArg -ne "") { $deployArgs += $orgArg }
+          if ($trackArg -ne "") { $deployArgs += $trackArg }
+          & $env:CHOREO_CLI @deployArgs
           exit $LASTEXITCODE
