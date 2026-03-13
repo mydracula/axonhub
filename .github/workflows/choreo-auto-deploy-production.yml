@@ -160,14 +160,29 @@ jobs:
             $buildsOut = (& $env:CHOREO_CLI @listArgs 2>&1 | Out-String)
             Write-Output $buildsOut
 
-            $uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
             $lines = $buildsOut -split "`r?`n"
+            $buildRows = @()
+
+            foreach ($line in $lines) {
+              $trim = $line.Trim()
+              if (-not ($trim -match "^\d+")) { continue }
+
+              $parts = [regex]::Split($trim, "\s{2,}")
+              if ($parts.Count -lt 4) { continue }
+              if (-not ($parts[0] -match "^\d+$")) { continue }
+
+              $buildRows += [PSCustomObject]@{
+                BuildId = $parts[0]
+                Status  = $parts[1].ToLowerInvariant()
+                Commit  = $parts[3].ToLowerInvariant()
+                Raw     = $trim
+              }
+            }
 
             if (-not [string]::IsNullOrWhiteSpace($commitHint)) {
-              foreach ($line in $lines) {
-                $idMatch = [regex]::Match($line, $uuidPattern)
-                if ($idMatch.Success -and $line.ToLowerInvariant().Contains($commitHint.ToLowerInvariant())) {
-                  $buildId = $idMatch.Value
+              foreach ($row in $buildRows) {
+                if ($row.Commit.Contains($commitHint.ToLowerInvariant()) -and $row.Status -eq "success") {
+                  $buildId = $row.BuildId
                   Write-Output "Matched build ID by commit hint '$commitHint': $buildId"
                   break
                 }
@@ -175,13 +190,18 @@ jobs:
             }
 
             if ([string]::IsNullOrWhiteSpace($buildId)) {
-              foreach ($line in $lines) {
-                $idMatch = [regex]::Match($line, $uuidPattern)
-                if ($idMatch.Success) {
-                  $buildId = $idMatch.Value
-                  Write-Output "Using latest visible build ID fallback: $buildId"
-                  break
-                }
+              $firstSuccess = $buildRows | Where-Object { $_.Status -eq "success" } | Select-Object -First 1
+              if ($firstSuccess) {
+                $buildId = $firstSuccess.BuildId
+                Write-Output "Using latest successful build ID fallback: $buildId"
+              }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($buildId)) {
+              $firstAny = $buildRows | Select-Object -First 1
+              if ($firstAny) {
+                $buildId = $firstAny.BuildId
+                Write-Output "Using latest visible build ID fallback: $buildId"
               }
             }
           }
