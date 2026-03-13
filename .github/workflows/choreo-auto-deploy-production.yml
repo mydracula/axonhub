@@ -1,0 +1,163 @@
+name: Choreo Auto Deploy to Production
+
+on:
+  repository_dispatch:
+    types:
+      - choreo-ready-for-production
+  workflow_dispatch:
+    inputs:
+      expected_image_tag:
+        description: 'Expected image tag (without -amd64 suffix), for example: release-v0.9.x-a1b2c3d'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: choreo-production-${{ github.event_name }}-${{ github.event.client_payload.source_run_id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    env:
+      CHOREO_PROJECT: ${{ vars.CHOREO_PROJECT }}
+      CHOREO_COMPONENT: ${{ vars.CHOREO_COMPONENT }}
+      CHOREO_DEV_ENV: ${{ vars.CHOREO_DEV_ENV }}
+      CHOREO_PROD_ENV: ${{ vars.CHOREO_PROD_ENV }}
+      EXPECTED_IMAGE_TAG: ${{ github.event.client_payload.image_tag || inputs.expected_image_tag }}
+    steps:
+      - name: Validate required configuration
+        shell: bash
+        env:
+          CHOREO_TOKEN: ${{ secrets.CHOREO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CHOREO_TOKEN:-}" ]]; then
+            echo "Missing required secret: CHOREO_TOKEN"
+            exit 1
+          fi
+          if [[ -z "${CHOREO_PROJECT:-}" ]]; then
+            echo "Missing required repository variable: CHOREO_PROJECT"
+            exit 1
+          fi
+          if [[ -z "${CHOREO_COMPONENT:-}" ]]; then
+            echo "Missing required repository variable: CHOREO_COMPONENT"
+            exit 1
+          fi
+          if [[ -z "${EXPECTED_IMAGE_TAG:-}" ]]; then
+            echo "Missing expected image tag from dispatch payload or manual input."
+            exit 1
+          fi
+
+      - name: Install Choreo CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://cli.choreo.dev/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.choreo/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve CLI binary
+        id: cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v choreo >/dev/null 2>&1; then
+            echo "name=choreo" >> "$GITHUB_OUTPUT"
+            choreo --version
+            exit 0
+          fi
+          if command -v wdp >/dev/null 2>&1; then
+            echo "name=wdp" >> "$GITHUB_OUTPUT"
+            wdp --version
+            exit 0
+          fi
+          echo "Neither 'choreo' nor 'wdp' CLI is available after install."
+          exit 1
+
+      - name: Login with PAT
+        shell: bash
+        env:
+          CHOREO_TOKEN: ${{ secrets.CHOREO_TOKEN }}
+          CHOREO_CLI: ${{ steps.cli.outputs.name }}
+        run: |
+          set -euo pipefail
+          echo "$CHOREO_TOKEN" | "$CHOREO_CLI" login --with-token
+
+      - name: Wait for Development to become ready on expected image
+        id: wait_dev
+        shell: bash
+        env:
+          CHOREO_CLI: ${{ steps.cli.outputs.name }}
+        run: |
+          set -euo pipefail
+          dev_env="${CHOREO_DEV_ENV:-Development}"
+          expected_tag="${EXPECTED_IMAGE_TAG}-amd64"
+
+          for i in {1..90}; do
+            out="$("$CHOREO_CLI" describe component "$CHOREO_COMPONENT" --project="$CHOREO_PROJECT" 2>&1 || true)"
+            echo "$out"
+
+            build_id="$(echo "$out" | grep -Eio 'build[[:space:]_-]*id[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._:-]+' \
+              | awk -F '[:=]' '{gsub(/[[:space:]]/, "", $2); print $2}' \
+              | tail -n1 || true)"
+            if [[ -n "$build_id" ]]; then
+              echo "Detected build id candidate: $build_id"
+            fi
+
+            has_env='false'
+            if echo "$out" | grep -Eiq "$dev_env"; then
+              has_env='true'
+            fi
+
+            has_tag='false'
+            if echo "$out" | grep -Fq "$expected_tag"; then
+              has_tag='true'
+            fi
+
+            has_success='false'
+            if echo "$out" | grep -Eiq 'successful|active|ready|deployed'; then
+              has_success='true'
+            fi
+
+            has_failure='false'
+            if echo "$out" | grep -Eiq 'failed|error|canceled|cancelled'; then
+              has_failure='true'
+            fi
+
+            if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_success" == 'true' ]]; then
+              echo "Development environment is ready on expected image tag: $expected_tag"
+              echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [[ "$has_env" == 'true' && "$has_tag" == 'true' && "$has_failure" == 'true' ]]; then
+              echo "Development build/deploy failed for expected image tag: $expected_tag"
+              exit 1
+            fi
+
+            echo "Development is not ready on $expected_tag yet (attempt $i/90), wait 20s..."
+            sleep 20
+          done
+
+          echo "Timed out waiting for Development readiness on expected image tag."
+          exit 1
+
+      - name: Deploy to Production
+        shell: bash
+        env:
+          CHOREO_CLI: ${{ steps.cli.outputs.name }}
+        run: |
+          set -euo pipefail
+          prod_env="${CHOREO_PROD_ENV:-Production}"
+          build_id="${{ steps.wait_dev.outputs.build_id }}"
+
+          if [[ -n "$build_id" ]]; then
+            "$CHOREO_CLI" create deployment "$CHOREO_COMPONENT" --env="$prod_env" --project="$CHOREO_PROJECT" --build-id="$build_id"
+            exit 0
+          fi
+
+          # Fallback for CLI/format variants where build id is not exposed in component details.
+          "$CHOREO_CLI" create deployment "$CHOREO_COMPONENT" --env="$prod_env" --project="$CHOREO_PROJECT"

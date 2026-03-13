@@ -9,6 +9,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      update_test_branch_for_choreo:
+        description: 'Update test branch Dockerfile(s) to pin the new amd64 image tag for Choreo auto build'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_single_arch:
@@ -40,7 +46,7 @@ jobs:
           git fetch --tags --force --depth=1
           RAW_TAG=${GITHUB_REF#refs/tags/}
           if [[ "$GITHUB_REF" != refs/tags/* ]]; then
-            RAW_TAG=${GITHUB_REF_NAME}
+            RAW_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
           fi
           TAG=$(echo "$RAW_TAG" | tr '/:@' '-' | tr -cd 'A-Za-z0-9_.-')
           echo "TAG=$TAG" >> $GITHUB_ENV
@@ -108,3 +114,86 @@ jobs:
             -t ghcr.io/${{ github.repository }}:latest \
             ghcr.io/${{ github.repository }}:latest-amd64 \
             ghcr.io/${{ github.repository }}:latest-arm64
+
+  update_test_branch_for_choreo:
+    name: Update test branch image pin for Choreo
+    needs: [build_single_arch]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_test_branch_for_choreo }}
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW_TAG="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          fi
+          TAG="$(echo "$RAW_TAG" | tr '/:@' '-' | tr -cd 'A-Za-z0-9_.-')"
+          if [[ -z "$TAG" ]]; then
+            echo "Failed to resolve image tag from ref: $RAW_TAG"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout test branch
+        uses: actions/checkout@v4
+        with:
+          ref: test
+          fetch-depth: 0
+
+      - name: Update Dockerfile image tags
+        id: update_files
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image_ref="ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG}-amd64"
+          files=(Dockerfile Dockerfile-choreo)
+
+          for f in "${files[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              echo "Missing expected file in test branch: $f"
+              exit 1
+            fi
+
+            # Pin the runtime base image to an immutable tag instead of latest-amd64.
+            sed -i -E "s|^FROM[[:space:]]+ghcr\\.io/mydracula/axonhub:[^[:space:]]+|FROM ${image_ref}|g" "$f"
+          done
+
+          if git diff --quiet -- Dockerfile Dockerfile-choreo; then
+            echo "No changes in Dockerfile(s); skip commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Dockerfile Dockerfile-choreo
+          git commit -m "chore(choreo): pin image to ${IMAGE_TAG}-amd64 [skip ci]"
+          git push origin HEAD:test
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Choreo auto deploy workflow
+        if: ${{ steps.update_files.outputs.changed == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -n \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg source_run_id "${GITHUB_RUN_ID}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            '{event_type:"choreo-ready-for-production",client_payload:{image_tag:$image_tag,source_run_id:$source_run_id,source_sha:$source_sha}}')"
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -d "$payload"
