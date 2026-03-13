@@ -104,12 +104,7 @@ jobs:
             exit $LASTEXITCODE
           }
 
-          if (-not [string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
-            & $env:CHOREO_CLI change-org --org $env:CHOREO_ORG --non-interactive
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to switch Choreo org to '$($env:CHOREO_ORG)'. Check CHOREO_ORG and CHOREO_TOKEN permissions."
-            }
-          }
+          # PAT login mode does not support `change-org`; login --org is the supported way.
 
           $buildId = ""
           $ready = $false
