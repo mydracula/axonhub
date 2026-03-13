@@ -24,6 +24,7 @@ jobs:
     env:
       CHOREO_PROJECT: ${{ vars.CHOREO_PROJECT }}
       CHOREO_COMPONENT: ${{ vars.CHOREO_COMPONENT }}
+      CHOREO_ORG: ${{ vars.CHOREO_ORG }}
       CHOREO_DEV_ENV: ${{ vars.CHOREO_DEV_ENV }}
       CHOREO_PROD_ENV: ${{ vars.CHOREO_PROD_ENV }}
       EXPECTED_IMAGE_TAG: ${{ github.event.client_payload.image_tag || inputs.expected_image_tag }}
@@ -93,9 +94,21 @@ jobs:
           $prodEnv = if ([string]::IsNullOrWhiteSpace($env:CHOREO_PROD_ENV)) { "Production" } else { $env:CHOREO_PROD_ENV }
           $expectedTag = "$($env:EXPECTED_IMAGE_TAG)-amd64"
 
-          $env:CHOREO_TOKEN | & $env:CHOREO_CLI login --with-token
+          if ([string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
+            Write-Output "CHOREO_ORG is not set; using token default organization."
+            $env:CHOREO_TOKEN | & $env:CHOREO_CLI login --with-token --non-interactive
+          } else {
+            $env:CHOREO_TOKEN | & $env:CHOREO_CLI login --with-token --org $env:CHOREO_ORG --non-interactive
+          }
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:CHOREO_ORG)) {
+            & $env:CHOREO_CLI change-org --org $env:CHOREO_ORG --non-interactive
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to switch Choreo org to '$($env:CHOREO_ORG)'. Check CHOREO_ORG and CHOREO_TOKEN permissions."
+            }
           }
 
           $buildId = ""
