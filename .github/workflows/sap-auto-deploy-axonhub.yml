@@ -18,8 +18,8 @@ on:
           - SAP-JP(Tokyo)
       docker_image:
         description: "要部署的Docker镜像"
-        required: true
-        default: "ghcr.io/mydracula/axonhub:release-v0.9.x-f9c460d-amd64"
+        required: false
+        default: ""
         type: string
       app_name:
         description: "应用名称（可选，留空自动生成）"
@@ -95,6 +95,14 @@ jobs:
             echo "APP_NAME=${{ github.event.inputs.app_name }}" >> "$GITHUB_ENV"
           fi
 
+      - name: Resolve docker image
+        run: |
+          if [ -n "${{ github.event.inputs.docker_image }}" ]; then
+            echo "DOCKER_IMAGE=${{ github.event.inputs.docker_image }}" >> "$GITHUB_ENV"
+          else
+            echo "DOCKER_IMAGE=ghcr.io/${{ github.repository }}:latest-amd64" >> "$GITHUB_ENV"
+          fi
+
       - name: Login to SAP CF
         env:
           CF_EMAIL: ${{ secrets.SAP_CF_EMAIL }}
@@ -133,7 +141,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           BASE_ARGS=(
-            --docker-image "${{ github.event.inputs.docker_image }}"
+            --docker-image "$DOCKER_IMAGE"
             -m "${{ github.event.inputs.memory }}"
             -k "${{ github.event.inputs.disk }}"
             --health-check-type port
@@ -180,7 +188,7 @@ jobs:
           echo "Org: $ORG"
           echo "Space: $SPACE"
           echo "App: $APP_NAME"
-          echo "Image: ${{ github.event.inputs.docker_image }}"
+          echo "Image: $DOCKER_IMAGE"
           if [ -n "$ROUTE" ]; then
             echo "URL: https://$ROUTE"
           fi
