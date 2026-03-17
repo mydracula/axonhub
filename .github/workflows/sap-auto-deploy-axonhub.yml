@@ -1,0 +1,186 @@
+name: 自动部署AxonHub到SAP
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "选择部署区域"
+        required: true
+        default: "US(free)"
+        type: choice
+        options:
+          - SG(free)
+          - US(free)
+          - SAP-UAE(Dubai)
+          - SAP-AU(Sydney)
+          - SAP-US(Sterling)
+          - SAP-US-West(Colorado)
+          - SAP-JP(Tokyo)
+      docker_image:
+        description: "要部署的Docker镜像"
+        required: true
+        default: "ghcr.io/mydracula/axonhub:release-v0.9.x-f9c460d-amd64"
+        type: string
+      app_name:
+        description: "应用名称（可选，留空自动生成）"
+        required: false
+        default: ""
+        type: string
+      memory:
+        description: "内存配额（例如 512M / 1G）"
+        required: true
+        default: "1G"
+        type: string
+      disk:
+        description: "磁盘配额（例如 1G / 2G）"
+        required: true
+        default: "1G"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install CF CLI
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+          echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update
+          sudo apt-get install -y cf8-cli
+
+      - name: Resolve region and app name
+        run: |
+          RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
+
+          case "${{ github.event.inputs.region }}" in
+            "SG(free)")
+              echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-sg${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "US(free)")
+              echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-us${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "SAP-UAE(Dubai)")
+              echo "CF_API=https://api.cf.ae01.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-ae${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "SAP-AU(Sydney)")
+              echo "CF_API=https://api.cf.ap01.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-ap${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "SAP-US(Sterling)")
+              echo "CF_API=https://api.cf.us01.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-us1${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "SAP-US-West(Colorado)")
+              echo "CF_API=https://api.cf.us02.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-us2${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            "SAP-JP(Tokyo)")
+              echo "CF_API=https://api.cf.jp01.hana.ondemand.com" >> "$GITHUB_ENV"
+              echo "APP_NAME=axonhub-jp${RANDOM_STR}" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported region: ${{ github.event.inputs.region }}"
+              exit 1
+              ;;
+          esac
+
+          if [ -n "${{ github.event.inputs.app_name }}" ]; then
+            echo "APP_NAME=${{ github.event.inputs.app_name }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Login to SAP CF
+        env:
+          CF_EMAIL: ${{ secrets.SAP_CF_EMAIL }}
+          CF_PASSWORD: ${{ secrets.SAP_CF_PASSWORD }}
+          CF_ORG: ${{ secrets.SAP_CF_ORG }}
+          CF_SPACE: ${{ secrets.SAP_CF_SPACE }}
+        run: |
+          if [ -z "$CF_EMAIL" ] || [ -z "$CF_PASSWORD" ]; then
+            echo "Missing required secrets: SAP_CF_EMAIL / SAP_CF_PASSWORD"
+            exit 1
+          fi
+
+          cf login -a "$CF_API" -u "$CF_EMAIL" -p "$CF_PASSWORD"
+
+          if [ -n "$CF_ORG" ] && [ -n "$CF_SPACE" ]; then
+            ORG="$CF_ORG"
+            SPACE="$CF_SPACE"
+          else
+            ORG=$(cf orgs | awk 'NR==4 {print $1}')
+            SPACE=$(cf spaces | awk 'NR==4 {print $1}')
+          fi
+
+          if [ -z "$ORG" ] || [ -z "$SPACE" ]; then
+            echo "Cannot resolve org/space. Set SAP_CF_ORG and SAP_CF_SPACE secrets."
+            exit 1
+          fi
+
+          echo "ORG=$ORG" >> "$GITHUB_ENV"
+          echo "SPACE=$SPACE" >> "$GITHUB_ENV"
+
+          cf login -a "$CF_API" -u "$CF_EMAIL" -p "$CF_PASSWORD" -o "$ORG" -s "$SPACE"
+
+      - name: Push app (no-start)
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          BASE_ARGS=(
+            --docker-image "${{ github.event.inputs.docker_image }}"
+            -m "${{ github.event.inputs.memory }}"
+            -k "${{ github.event.inputs.disk }}"
+            --health-check-type port
+            --no-start
+            -c 'sh -c "export AXONHUB_SERVER_HOST=0.0.0.0; export AXONHUB_SERVER_PORT=${PORT:-8090}; exec /app/axonhub"'
+          )
+
+          if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+            cf push "$APP_NAME" "${BASE_ARGS[@]}" \
+              --docker-username "$GHCR_USERNAME" \
+              --docker-password "$GHCR_TOKEN"
+          else
+            cf push "$APP_NAME" "${BASE_ARGS[@]}"
+          fi
+
+      - name: Set optional AxonHub env
+        env:
+          AXONHUB_DB_DIALECT: ${{ secrets.AXONHUB_DB_DIALECT }}
+          AXONHUB_DB_DSN: ${{ secrets.AXONHUB_DB_DSN }}
+        run: |
+          if [ -n "$AXONHUB_DB_DIALECT" ]; then
+            cf set-env "$APP_NAME" AXONHUB_DB_DIALECT "$AXONHUB_DB_DIALECT"
+          fi
+
+          if [ -n "$AXONHUB_DB_DSN" ]; then
+            cf set-env "$APP_NAME" AXONHUB_DB_DSN "$AXONHUB_DB_DSN"
+          fi
+
+      - name: Start and verify
+        run: |
+          cf start "$APP_NAME"
+          STATUS=$(cf app "$APP_NAME" | awk '/requested state:/ {print $3}')
+          if [ "$STATUS" != "started" ]; then
+            echo "App is not started. Current status: $STATUS"
+            cf logs "$APP_NAME" --recent
+            exit 1
+          fi
+
+      - name: Output deploy info
+        run: |
+          ROUTE=$(cf app "$APP_NAME" | awk '/routes:/ {print $2}')
+          echo "部署成功"
+          echo "Region: ${{ github.event.inputs.region }}"
+          echo "Org: $ORG"
+          echo "Space: $SPACE"
+          echo "App: $APP_NAME"
+          echo "Image: ${{ github.event.inputs.docker_image }}"
+          if [ -n "$ROUTE" ]; then
+            echo "URL: https://$ROUTE"
+          fi
